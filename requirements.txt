@@ -1,0 +1,8 @@
+# Python dependencies (install with: pip install -r requirements.txt)
+opencv-python>=4.5.5.64
+numpy>=1.21.0
+imutils>=0.5.4
+
+# Note: Picamera2 (Picamera 2) is typically provided as a system package on Raspberry Pi
+# (install with: sudo apt install python3-picamera2). If you have a pip-installable
+# picamera2 on your platform, you may add `picamera2` to this file.
