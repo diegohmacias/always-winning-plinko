@@ -19,9 +19,17 @@ from picamera2 import Picamera2
 # -----------------CONFIGURATION------------------------
 PREVIEW_SIZE = (640, 480)
 DETECT_SIZE = (160, 120)
+
+# Color threshold for blue (HSV)
 BLUE_LOWER = np.array([95, 100, 60])
 BLUE_UPPER = np.array([135, 255, 255])
-MIN_BLOB_AREA = 50
+
+# Blob size/shape constarints (NOTE: these are in DETECT_SIZE pixels)
+MIN_BLOB_AREA = 50      # Minimum area of blue blob to be considered valid
+MAX_BLOB_AREA = 1500    # Maximum area of blue blob to be considered valid <- to ignore the blue catcher that is larger than the ball's ~ 1.25 inch diameter
+CIRC_MIN = 0.75         # Circularity threshold(0-1), higher = more circular
+AR_MIN = 0.75           # Bounding box aspect ratio lower bound (w/h)
+AR_MAX = 1.33           # Bounding box aspect ratio upper bound (w/h)
 
 SERIAL_PORT = '/dev/ttyACM0'     
 BAUD_RATE = 9600
@@ -46,32 +54,68 @@ def compute_board_transform(corners_img):
     return H
 
 def detect_blue_blob(frame_bgr):
+    # Work at DETECT_SIZE resolution
     small = cv2.resize(frame_bgr, DETECT_SIZE, interpolation=cv2.INTER_LINEAR)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+
+    # Color mask
     mask = cv2.inRange(hsv, BLUE_LOWER, BLUE_UPPER)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # Find contours on the small image
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
     best = None
     best_area = 0
+
+    # target area center used for tie-breaking (midpoint between min/max)
+    target_area = 0.5 * (MIN_BLOB_AREA + MAX_BLOB_AREA)
+
     for c in contours:
         a = cv2.contourArea(c)
-        if a < MIN_BLOB_AREA:
+        if a < MIN_BLOB_AREA or a > MAX_BLOB_AREA:
             continue
-        if a > best_area:
-            best_area = a
+
+        p = cv2.arcLength(c, True) # perimeter
+        if p <= 0:
+            continue
+
+        circ = float(4.0 * np.pi * a / (p * p))
+        if circ < CIRC_MIN:
+            continue
+
+        x, y, w, h = cv2.boundingRect(c)
+        ar = float(w) / float(h) if h > 0 else 999.0
+        if ar < AR_MIN or ar > AR_MAX:
+            continue
+
+        # score: prioritize circulatrity, then area closeness to target
+        area_closesness = 1.0 - min(1.0, abs(a - target_area) / max(target_area, 1.0))
+        score = 0.7 * circ + 0.3 * area_closesness
+        
+        if score > best_score:
+            best_score = score
             best = c
+            best_metrics = (a, circ, ar, x, y, w, h)
+                            
     if best is None:
         return None, None
-    x, y, w, h = cv2.boundingRect(best)
-    cx = x + w/2
-    cy = y + h/2
+    
+    # Use best contour's bounding box and centroid, then scale back to preview coords
+    a, circ, ar, x, y, w, h = best_metrics
+
+    # Centroid from bounding box center (fast and sufficient here)
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+
     # scale up to preview coords
     scale_x = frame_bgr.shape[1] / DETECT_SIZE[0]
     scale_y = frame_bgr.shape[0] / DETECT_SIZE[1]
     centroid = (cx*scale_x, cy*scale_y)
     box = (int(x*scale_x), int(y*scale_y), int(w*scale_x), int(h*scale_y))
+    
     return box, centroid
 
 def main():
