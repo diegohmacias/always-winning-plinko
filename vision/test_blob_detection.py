@@ -22,7 +22,7 @@ import numpy as np
 # USER-CONFIGURABLE PARAMETERS
 PREVIEW_SIZE = (640, 480)  # width x height for preview
 DETECT_SIZE = (160, 120)   # width x height for detection
-DETECT_FPS_CAP = 15.0      # maximum detection frequency (Hz)
+DETECT_FPS_CAP = 30.0      # maximum detection frequency (Hz)
 QUEUE_MAX = 2              # internal frame queue size between preview and detector
 
 # Camera calibration parameters
