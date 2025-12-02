@@ -21,8 +21,8 @@ import time
 
 # --- User parameters ---
 PREVIEW_SIZE = (640, 480)      # width, height for preview window
-BOARD_WIDTH_IN = 12.375        # inches
-BOARD_HEIGHT_IN = 12.375       # inches
+BOARD_WIDTH_IN = 12.5          # inches
+BOARD_HEIGHT_IN = 18.75        # inches
 # -----------------------------
 
 # Globals (for mouse callback)
