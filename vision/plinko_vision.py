@@ -3,10 +3,9 @@
 Board coordinate + blue-blob detection + Arduino serial output.
 
 1. Preview at PREVIEW_SIZE. User clicks 4 corners of board in defined order.
-2. Send HOME command to Arduino and wait for homing to complete
-3. Detection at smaller DETECT_SIZE for speed with HSV tuning controls.
-4. On detection of blue blob: compute normalized x position on board (0-1).
-5. Send x_norm via serial to Arduino.
+2. Send HOME command to Arduino (moves to left corner, 0.0 normalized)
+3. Continuously detect blue blob and send normalized x position to Arduino
+4. Arduino runs PID continuously to track ball position
 
 Press 'q' to quit
 Press 't' to toggle tuning mode (show/hide controls and mask)
@@ -44,7 +43,7 @@ EXPECTED_BALL_PIXELS = BALL_DIAMETER * PIXELS_PER_INCH
 EXPECTED_BALL_AREA = np.pi * (EXPECTED_BALL_PIXELS / 2) ** 2
 
 # Global variables for trackbar values - TUNED PARAMETERS
-hsv_lower = [101, 98, 46]
+hsv_lower = [101, 104, 46]
 hsv_upper = [142, 255, 255]
 min_area_ratio = 12
 max_area_ratio = 104
@@ -64,6 +63,7 @@ clicked_points = []
 latest_mask = None
 mask_lock = threading.Lock()
 tuning_mode = False
+last_x_norm_sent = None  # Track last sent position
 # -----------------------------------------------------
 
 def nothing(x):
@@ -129,11 +129,12 @@ def compute_board_transform(corners_img):
 def send_home_command(ser):
     """Send HOME command to Arduino and wait for completion"""
     print("\n=== Sending HOME command to Arduino ===")
+    print("Catcher will move to LEFT position (0.0 normalized)")
     ser.write(b"HOME\n")
     ser.flush()
     
     # Wait for homing to complete
-    timeout = 15.0  # 15 second timeout for homing
+    timeout = 10.0  # 10 second timeout for homing
     start_time = time.time()
     
     while time.time() - start_time < timeout:
@@ -143,7 +144,7 @@ def send_home_command(ser):
                 print(f"Arduino: {response}")
                 
                 if "HOMING_COMPLETE" in response:
-                    print("✓ Homing successful!")
+                    print("✓ Homing successful! Catcher at LEFT position.")
                     return True
                 elif "HOMING_FAILED" in response:
                     print("✗ Homing failed!")
@@ -245,7 +246,7 @@ def blob_detection_worker(frame_q, result_q, stop_event):
             pass
 
 def main():
-    global tuning_mode
+    global tuning_mode, last_x_norm_sent
     
     # Set up serial connection to Arduino
     try:
@@ -312,7 +313,7 @@ def main():
             print("Board transform computed.")
             break
 
-    # Phase 2: Home the catcher
+    # Phase 2: Home the catcher to LEFT position
     print("\n=== PHASE 2: Homing Catcher ===")
     if not send_home_command(ser):
         print("ERROR: Homing failed. Exiting.")
@@ -321,7 +322,8 @@ def main():
         ser.close()
         return
     
-    print("\n=== PHASE 3: Ball Detection ===")
+    print("\n=== PHASE 3: Ball Detection & Tracking ===")
+    print("Catcher will continuously track ball position")
     print("Press 'q' to quit")
     print("Press 't' to toggle tuning mode (shows controls and mask)")
 
@@ -329,7 +331,7 @@ def main():
     create_control_window()
     cv2.destroyWindow("Controls")
 
-    # Phase 3: Detection + Serial Output
+    # Phase 3: Detection + Continuous Serial Output
     frame_q = queue.Queue(maxsize=QUEUE_MAX)
     result_q = queue.Queue(maxsize=QUEUE_MAX)
     stop_event = threading.Event()
@@ -340,6 +342,9 @@ def main():
     fps_preview = 0.0
     latest_blobs = []
     latest_det_time = 0.0
+    
+    # Initialize with home position
+    last_x_norm_sent = 0.0
 
     try:
         while True:
@@ -384,38 +389,29 @@ def main():
             sx = w_preview / DETECT_SIZE[0]
             sy = h_preview / DETECT_SIZE[1]
 
-            for blob in latest_blobs:
+            # Determine position to send
+            x_norm_to_send = None
+            
+            if len(latest_blobs) > 0:
+                # Ball detected - use its position
+                blob = latest_blobs[0]  # Use first (best) detection
                 cx, cy, x1, y1, x2, y2, area, circularity, diameter_inches = blob
                 
                 cx_preview = cx * sx
                 cy_preview = cy * sy
-                x1p = int(x1 * sx)
-                y1p = int(y1 * sy)
-                x2p = int(x2 * sx)
-                y2p = int(y2 * sy)
                 
                 pt_img = np.array([[[cx_preview, cy_preview]]], dtype=np.float32)
                 pt_board = cv2.perspectiveTransform(pt_img, board_H)[0][0]
                 x_norm = float(pt_board[0])
-                
                 x_norm = max(0.0, min(1.0, x_norm))
                 
-                message = f"{x_norm:.4f}\n"
-                try:
-                    ser.write(message.encode('utf-8'))
-                    ser.flush()
-                except Exception as e:
-                    print(f"Serial write error: {e}")
+                x_norm_to_send = x_norm
                 
-                if ser.in_waiting > 0:
-                    try:
-                        response = ser.readline().decode('utf-8').rstrip()
-                        if not response.startswith("TARGET"):
-                            print(f"Arduino: {response}")
-                    except:
-                        pass
-                
-                print(f"Sent x_norm={x_norm:.4f} | Diameter={diameter_inches:.2f}\" | Circ={circularity:.0f}%")
+                # Draw detection
+                x1p = int(x1 * sx)
+                y1p = int(y1 * sy)
+                x2p = int(x2 * sx)
+                y2p = int(y2 * sy)
                 
                 cv2.rectangle(frame_bgr, (x1p, y1p), (x2p, y2p), (0, 255, 0), 2)
                 
@@ -427,7 +423,21 @@ def main():
                 info_text = f"x={x_norm:.3f}"
                 cv2.putText(frame_bgr, info_text, (x1p, y1p - 5), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            else:
+                # No ball detected - send last known position or home position
+                x_norm_to_send = last_x_norm_sent if last_x_norm_sent is not None else 0.0
+            
+            # Send position to Arduino (continuously)
+            if x_norm_to_send is not None:
+                message = f"{x_norm_to_send:.4f}\n"
+                try:
+                    ser.write(message.encode('utf-8'))
+                    ser.flush()
+                    last_x_norm_sent = x_norm_to_send
+                except Exception as e:
+                    print(f"Serial write error: {e}")
 
+            # Draw overlay info
             font = cv2.FONT_HERSHEY_SIMPLEX
             scale = 0.5
             thickness = 1
@@ -436,7 +446,7 @@ def main():
             info_lines = [
                 f"FPS: {fps_preview:.1f}",
                 f"Detections: {len(latest_blobs)}",
-                f"Frame Q: {frame_q.qsize()}/{QUEUE_MAX}",
+                f"Target x: {last_x_norm_sent:.3f}" if last_x_norm_sent is not None else "Target x: N/A",
                 f"Mode: {'TUNING' if tuning_mode else 'RUNNING'}",
             ]
             
